@@ -11,7 +11,10 @@ class ResearchRAG:
         self.db_dir = "./data/chroma_db"
 
         # Fast, local embedding model running on CPU/RAM to save TPU memory for the LLM
-        self.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-small-en-v1.5",
+            model_kwargs={"device": "cpu"}
+        )
 
         # Initialize Vector Store
         self.vectorstore = Chroma(persist_directory=self.db_dir, embedding_function=self.embeddings)

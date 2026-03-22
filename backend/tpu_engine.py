@@ -25,7 +25,8 @@ class TPULLMEngine:
             model=self.model,
             tokenizer=self.tokenizer,
             max_new_tokens=1024,
-            temperature=0.3
+            temperature=0.3,
+            pad_token_id=self.tokenizer.eos_token_id
         )
         print("TPU Model loaded successfully!")
 
