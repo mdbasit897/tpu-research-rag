@@ -4,7 +4,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 
 class TPULLMEngine:
-    def __init__(self, model_id="Qwen/Qwen2.5-32B-Instruct"):
+    def __init__(self, model_id="Qwen/Qwen2.5-7B-Instruct"):
         print(f"Loading {model_id} onto TPU...")
 
         # Initialize the TPU device
