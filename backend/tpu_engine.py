@@ -77,46 +77,48 @@ class TPULLMEngine:
 
     def _greedy_generate_cached(self, input_ids):
         eos_id = self.tokenizer.eos_token_id
-        past_key_values = None
-        generated = input_ids
-        current_input = input_ids
+        generated = input_ids  # stays on TPU throughout
+        next_token = None
 
-        # Process FIRST step (full prompt) separately
+        # Prefill pass — process the full prompt
         with torch.no_grad():
             outputs = self.model(
-                input_ids=current_input,
+                input_ids=input_ids,
                 past_key_values=None,
                 use_cache=True,
             )
         past_key_values = outputs.past_key_values
-        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
-        xm.mark_step()  # Compile + execute the prefill graph
-        generated = torch.cat([generated, next_token], dim=-1)
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)  # on TPU
+        xm.mark_step()
+
+        generated = torch.cat([generated, next_token], dim=-1)  # both on TPU
 
         if next_token.item() == eos_id:
             return generated
 
-        # Decode steps: feed ONE token at a time using cached KV
+        # Decode loop — single token at a time using KV cache
         for step in range(self.max_new_tokens - 1):
             with torch.no_grad():
                 outputs = self.model(
-                    input_ids=next_token,       # Only the last token
+                    input_ids=next_token,  # TPU tensor
                     past_key_values=past_key_values,
                     use_cache=True,
                 )
             past_key_values = outputs.past_key_values
-            next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
+            next_token = torch.argmax(
+                outputs.logits[:, -1, :], dim=-1, keepdim=True
+            )  # output is on TPU
 
-            # mark_step every 10 tokens — reduces sync overhead vs every token
-            # while keeping graph size bounded
             if step % 10 == 0:
                 xm.mark_step()
 
-            generated = torch.cat([generated, next_token.cpu()], dim=-1)
+            # BOTH tensors are on TPU — no .cpu() anywhere in the loop
+            generated = torch.cat([generated, next_token], dim=-1)  #
 
+            # Pull scalar to CPU only for the EOS comparison (cheap, just 1 int)
             if next_token.item() == eos_id:
                 print(f"EOS hit at step {step + 1}")
                 break
 
-        xm.mark_step()  # Final sync
+        xm.mark_step()  # final sync before returning
         return generated
