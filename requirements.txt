@@ -1,0 +1,12 @@
+torch~=2.3.0
+torch_xla[tpu]~=2.3.0
+transformers
+accelerate
+langchain
+langchain-huggingface
+langchain-community
+chromadb
+sentence-transformers
+pypdf
+streamlit
+optimum-tpu
