@@ -1,6 +1,6 @@
 import torch
 import torch_xla.core.xla_model as xm
-from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class TPULLMEngine:
@@ -19,16 +19,37 @@ class TPULLMEngine:
         self.model.to(self.device)
         self.model.eval()
 
-        self.max_new_tokens = 256   # Keep low to avoid HBM OOM
-        self.max_input_tokens = 1024  # Hard cap on input length
+        # Warm up the TPU so first real query isn't slow
+        self._warmup()
+
+        self.max_new_tokens = 150    # Keep short for Streamlit timeout budget
+        self.max_input_tokens = 768
 
         print("TPU Model loaded successfully!")
+
+    def _warmup(self):
+        """
+        Run a dummy forward pass so XLA compiles the graph before
+        the first real user query. Without this, the first query
+        takes 60-120s for compilation and Streamlit times out.
+        """
+        print("Warming up TPU (compiling XLA graph)...")
+        dummy = self.tokenizer("Hello", return_tensors="pt", return_attention_mask=False)
+        dummy_ids = dummy["input_ids"].to(self.device)
+        with torch.no_grad():
+            out = self.model(input_ids=dummy_ids, use_cache=False)
+        xm.mark_step()
+        print("TPU warmup complete.")
 
     def generate_response(self, prompt):
         messages = [
             {
                 "role": "system",
-                "content": "You are a helpful AI research assistant. Be concise. Answer based on the provided context.",
+                "content": (
+                    "You are a concise research assistant. "
+                    "Answer ONLY from the provided context. "
+                    "If the context lacks the answer, say so in one sentence."
+                ),
             },
             {"role": "user", "content": prompt},
         ]
@@ -37,7 +58,6 @@ class TPULLMEngine:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        # Tokenize with hard truncation to avoid OOM from long RAG contexts
         inputs = self.tokenizer(
             prompt_text,
             return_tensors="pt",
@@ -46,7 +66,6 @@ class TPULLMEngine:
             max_length=self.max_input_tokens,
         )
         input_ids = inputs["input_ids"].to(self.device)
-
         print(f"Input token count: {input_ids.shape[-1]}")
 
         with torch.no_grad():
@@ -57,40 +76,47 @@ class TPULLMEngine:
         return response.strip()
 
     def _greedy_generate_cached(self, input_ids):
-        """
-        Greedy generation with dynamic KV cache.
-        - use_cache=True: only processes NEW tokens each step (O(n) not O(n²))
-        - xm.mark_step() after each token: keeps XLA graphs small, avoids recompilation
-        - Stops at EOS or max_new_tokens
-        """
         eos_id = self.tokenizer.eos_token_id
         past_key_values = None
         generated = input_ids
-        current_input = input_ids  # First step: full prompt. After: only new token.
+        current_input = input_ids
 
-        for step in range(self.max_new_tokens):
+        # Process FIRST step (full prompt) separately
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=current_input,
+                past_key_values=None,
+                use_cache=True,
+            )
+        past_key_values = outputs.past_key_values
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
+        xm.mark_step()  # Compile + execute the prefill graph
+        generated = torch.cat([generated, next_token], dim=-1)
+
+        if next_token.item() == eos_id:
+            return generated
+
+        # Decode steps: feed ONE token at a time using cached KV
+        for step in range(self.max_new_tokens - 1):
             with torch.no_grad():
                 outputs = self.model(
-                    input_ids=current_input,
+                    input_ids=next_token,       # Only the last token
                     past_key_values=past_key_values,
-                    use_cache=True,          # Reuse KV cache — critical for memory
+                    use_cache=True,
                 )
-
             past_key_values = outputs.past_key_values
+            next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
 
-            next_token_logits = outputs.logits[:, -1, :]
-            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            # mark_step every 10 tokens — reduces sync overhead vs every token
+            # while keeping graph size bounded
+            if step % 10 == 0:
+                xm.mark_step()
 
-            # Sync TPU graph every step to prevent graph explosion
-            xm.mark_step()
-
-            generated = torch.cat([generated, next_token], dim=-1)
-
-            # Next iteration only feeds the single new token
-            current_input = next_token
+            generated = torch.cat([generated, next_token.cpu()], dim=-1)
 
             if next_token.item() == eos_id:
                 print(f"EOS hit at step {step + 1}")
                 break
 
+        xm.mark_step()  # Final sync
         return generated
