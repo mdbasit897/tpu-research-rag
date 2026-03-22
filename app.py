@@ -53,6 +53,13 @@ if prompt := st.chat_input("Ask a question about your documents..."):
     # Generate response
     with st.chat_message("assistant"):
         with st.spinner("Thinking (TPU Inference)..."):
-            response = rag_system.query(prompt)
+            try:
+                response = rag_system.query(prompt)
+            except Exception as exc:
+                response = (
+                    "I hit an inference error while generating a response. "
+                    "Please retry, and check backend logs for TPU/XLA details.\n\n"
+                    f"Error: `{exc}`"
+                )
             st.markdown(response)
             st.session_state.messages.append({"role": "assistant", "content": response})

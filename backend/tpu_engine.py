@@ -33,12 +33,11 @@ class TPULLMEngine:
 
         prompt_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        inputs = self.tokenizer(prompt_text, return_tensors="pt")
+        # Avoid passing attention_mask on TPU for single-sequence generation because
+        # some transformer/XLA combinations materialize float masks and hit
+        # bitwise-or dtype assertions inside torch_xla.
+        inputs = self.tokenizer(prompt_text, return_tensors="pt", return_attention_mask=False)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        if "attention_mask" in inputs:
-            # TPU/XLA bitwise ops require integral/pred masks.
-            inputs["attention_mask"] = inputs["attention_mask"].to(torch.long)
 
         with torch.no_grad():
             generated = self.model.generate(
@@ -47,6 +46,7 @@ class TPULLMEngine:
                 temperature=0.3,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
             )
 
         generated_text = self.tokenizer.decode(generated[0], skip_special_tokens=False)

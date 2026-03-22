@@ -5,6 +5,7 @@ accelerate
 langchain
 langchain-huggingface
 langchain-community
+langchain-chroma
 chromadb
 sentence-transformers
 pypdf
