@@ -11,37 +11,53 @@ class ResearchRAG:
         self.db_dir = "./data/chroma_db"
 
         print("Loading ONNX FastEmbed model (Bypassing PyTorch entirely)...")
-        # FastEmbed natively runs on CPU/ONNX, completely isolated from TPU
         self.embeddings = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         print("Embedding model loaded successfully!")
 
-        # Initialize Vector Store
-        self.vectorstore = Chroma(persist_directory=self.db_dir, embedding_function=self.embeddings)
+        self.vectorstore = Chroma(
+            persist_directory=self.db_dir,
+            embedding_function=self.embeddings,
+        )
 
     def process_and_store_document(self, file_path):
         print(f"Processing document: {file_path}")
         loader = PyPDFLoader(file_path)
         documents = loader.load()
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        # Smaller chunks = less context per query = less HBM pressure
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=400,     # Down from 1000
+            chunk_overlap=50,   # Down from 200
+        )
         chunks = text_splitter.split_documents(documents)
-
         self.vectorstore.add_documents(chunks)
         print(f"Stored {len(chunks)} chunks in vector database.")
 
     def query(self, user_question):
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": 4})
+        retriever = self.vectorstore.as_retriever(
+            search_kwargs={"k": 2}  # Down from 4 — fewer chunks = shorter prompt
+        )
         docs = retriever.invoke(user_question)
 
-        context = "\n\n".join([doc.page_content for doc in docs])
+        # Hard-cap context at 1500 chars (~375 tokens) to stay within budget
+        context_parts = []
+        total_chars = 0
+        for doc in docs:
+            if total_chars + len(doc.page_content) > 1500:
+                remaining = 1500 - total_chars
+                if remaining > 100:
+                    context_parts.append(doc.page_content[:remaining])
+                break
+            context_parts.append(doc.page_content)
+            total_chars += len(doc.page_content)
 
-        augmented_prompt = f"""
-        Context information is below:
-        ---------------------
-        {context}
-        ---------------------
-        Given the context information and not prior knowledge, answer the following question:
-        {user_question}
-        """
+        context = "\n\n".join(context_parts)
+
+        augmented_prompt = f"""Context:
+---------------------
+{context}
+---------------------
+Answer this question using only the context above. Be concise.
+Question: {user_question}"""
 
         return self.llm.generate_response(augmented_prompt)
